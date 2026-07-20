@@ -12,7 +12,7 @@ const pino = require('pino');
 // ============================================
 // 🔴 YE LINE BADALO - APNA NUMBER DAALO
 // ============================================
-const MY_NUMBER = "919876543210";  // ← Apna number yahan likho (country code + number)
+const MY_NUMBER = "16044090869";  // ← Apna number yahan likho (country code + number)
 // Example: India 9876543210 → "919876543210"
 // Example: Pakistan 3001234567 → "923001234567"
 // ============================================
