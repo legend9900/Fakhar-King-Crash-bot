@@ -259,7 +259,7 @@ Commands self-chat mein likho:
     try {
         // 🔥 YEH HAI SOLUTION - Pairing Code
         // Apna WhatsApp number yahan likho (country code ke saath)
-        const PAIRING_PHONE = "YOUR_NUMBER_HERE";  // ← YEH BADALO!
+        const PAIRING_PHONE = "16044090869";  // ← YEH BADALO!
         
         if (PAIRING_PHONE === "YOUR_NUMBER_HERE") {
             console.log("\n⚠️ Pehle apna number code mein daalo!");
