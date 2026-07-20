@@ -1,9 +1,12 @@
 {
-    "TELEGRAM_BOT_TOKEN": "8626940802:AAEEDyAEEkJFk-9aREywZJ7DOT4U5CEZTyI",
-    "OWNER_ID": "@fakhar_king_bot",
-    "ADMIN_IDS": [],
-    "DEFAULT_DELAY": 50,
-    "DEFAULT_COUNT": 80,
-    "FLOOD_COUNT": 200,
-    "ALLOW_ALL_USERS": false
+  "name": "whatsapp-selfchat-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^9.5.0",
+    "fs": "^0.0.1-security"
+  }
 }
